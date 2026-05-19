@@ -10,5 +10,6 @@ COPY app.py .
 COPY templates/ templates/
 
 EXPOSE 8080
-# Use shell form so $PORT expands (Railway injects PORT at runtime)
-CMD gunicorn --bind 0.0.0.0:${PORT:-8080} --timeout 120 --workers 1 app:app
+COPY start.sh .
+RUN chmod +x start.sh
+CMD ["/bin/bash", "start.sh"]
