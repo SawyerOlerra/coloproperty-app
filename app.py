@@ -9,6 +9,7 @@ import urllib.request
 import urllib.parse
 import http.cookiejar
 from flask import Flask, request, jsonify, render_template
+from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
 app = Flask(__name__)
 
@@ -53,23 +54,23 @@ def geocode(address: str) -> dict:
 # ──────────────────────────────────────────────────────────────────────────────
 
 ASSESSORS = {
-    '08001': ('Adams County',      'https://www.adcogov.org/assessor'),
-    '08005': ('Arapahoe County',   'https://www.arapahoegov.com/assessor'),
-    '08013': ('Boulder County',    'https://www.bouldercounty.gov/property-and-land/assessor/'),
-    '08014': ('Broomfield County', 'https://www.broomfield.org/212/Assessors-Office'),
-    '08031': ('Denver County',     'https://www.denvergov.org/Government/Departments/Assessment'),
-    '08035': ('Douglas County',    'https://assessor.douglas.co.us/'),
-    '08041': ('El Paso County',    'https://www.elpasoco.com/property-assessor/'),
-    '08059': ('Jefferson County',  'https://www.jeffco.us/assessor'),
-    '08069': ('Larimer County',    'https://www.larimer.gov/assessor/search'),
-    '08077': ('Mesa County',       'https://www.mesacounty.us/assessor/'),
-    '08101': ('Pueblo County',     'https://www.pueblocounty.us/departments/assessor'),
-    '08123': ('Weld County',       'https://www.weldgov.com/departments/assessor'),
+    '08001': ('Adams County',     'https://www.adcogov.org/assessor'),
+    '08005': ('Arapahoe County',  'https://www.arapahoegov.com/assessor'),
+    '08013': ('Boulder County',   'https://www.bouldercounty.gov/property-and-land/assessor/'),
+    '08014': ('Broomfield County','https://www.broomfield.org/212/Assessors-Office'),
+    '08031': ('Denver County',    'https://www.denvergov.org/Government/Departments/Assessment'),
+    '08035': ('Douglas County',   'https://assessor.douglas.co.us/'),
+    '08041': ('El Paso County',   'https://www.elpasoco.com/property-assessor/'),
+    '08059': ('Jefferson County', 'https://www.jeffco.us/assessor'),
+    '08069': ('Larimer County',   'https://www.larimer.gov/assessor/search'),
+    '08077': ('Mesa County',      'https://www.mesacounty.us/assessor/'),
+    '08101': ('Pueblo County',    'https://www.pueblocounty.us/departments/assessor'),
+    '08123': ('Weld County',      'https://www.weldgov.com/departments/assessor'),
 }
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# ColoProperty.com mapsearch API
+# ColoProperty.com mapsearch API (HTTP, no Playwright)
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _cp_cookies() -> str:
@@ -81,7 +82,7 @@ def _cp_cookies() -> str:
 
 
 def mapsearch(lat: float, lng: float, delta: float = 0.008) -> list:
-    """Find listings near lat/lng. Returns list of listing dicts."""
+    """Find listings near lat/lng. Returns list of {lid, addr1, addr2, ...}."""
     try:
         cookie_str = _cp_cookies()
         params = {
@@ -99,7 +100,7 @@ def mapsearch(lat: float, lng: float, delta: float = 0.008) -> list:
             'X-Requested-With': 'XMLHttpRequest',
             'Referer': 'https://www.coloproperty.com/',
         })
-        with urllib.request.urlopen(req, timeout=15) as r:
+        with urllib.request.urlopen(req, timeout=12) as r:
             data = json.loads(r.read())
         return data.get('D', {}).get('Results', [])
     except Exception:
@@ -107,8 +108,11 @@ def mapsearch(lat: float, lng: float, delta: float = 0.008) -> list:
 
 
 def _addr_similarity(listing: dict, target: str) -> float:
+    """Score how well a listing address matches the target (0–1)."""
     a1 = (listing.get('addr1') or '').lower()
-    nums_t = re.findall(r'\d+', target.lower())
+    target_l = target.lower()
+    # Extract street number and name from both
+    nums_t = re.findall(r'\d+', target_l)
     nums_a = re.findall(r'\d+', a1)
     if nums_t and nums_a and nums_t[0] == nums_a[0]:
         return 1.0
@@ -116,15 +120,18 @@ def _addr_similarity(listing: dict, target: str) -> float:
 
 
 def find_listing(lat: float, lng: float, address: str) -> dict | None:
+    """Return the mapsearch result that best matches the address."""
     results = mapsearch(lat, lng, delta=0.008)
     if not results:
         results = mapsearch(lat, lng, delta=0.02)
     if not results:
         return None
+    # Score each listing
     scored = [(r, _addr_similarity(r, address)) for r in results]
     best = max(scored, key=lambda x: x[1])
     if best[1] > 0:
         return best[0]
+    # No street-number match — return the closest by lat/lng
     def dist(r):
         dlat = float(r.get('lat', lat)) - lat
         dlng = float(r.get('lng', lng)) - lng
@@ -133,146 +140,80 @@ def find_listing(lat: float, lng: float, address: str) -> dict | None:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Parse mapsearch HTML fields (quick + summ)
+# Listing detail page scraper (Playwright)
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _strip_tags(html: str) -> str:
-    return re.sub(r'<[^>]+>', ' ', html or '')
-
-
-def _parse_quick(quick_html: str) -> dict:
-    """Extract structured fields from the mapsearch 'quick' HTML snippet."""
+def scrape_detail(lid) -> dict:
+    """Scrape /listing/details/{lid} and return all label→value pairs."""
     fields = {}
-    spans = [
-        (r'class="price"[^>]*>(.*?)</span>',        'Price'),
-        (r'class="card-status[^"]*"[^>]*>(.*?)</span>', 'Status'),
-        (r'class="beds"[^>]*>(.*?)</span>',          'Beds'),
-        (r'class="baths"[^>]*>(.*?)</span>',         'Baths'),
-        (r'class="sqft"[^>]*>(.*?)</span>',          'Square Feet'),
-        (r'class="bldg-sqft"[^>]*>(.*?)</span>',     'Building SqFt'),
-        (r'class="year-built"[^>]*>(.*?)</span>',    'Year Built'),
-        (r'class="zoning"[^>]*>(.*?)</span>',        'Zoning'),
-    ]
-    for pat, label in spans:
-        m = re.search(pat, quick_html, re.I | re.S)
-        if m:
-            val = _strip_tags(m.group(1)).strip()
-            if val:
-                fields[label] = val
-    return fields
+    source_url = f'https://www.coloproperty.com/listing/details/{lid}'
 
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(
+            headless=True,
+            args=['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+        )
+        ctx = browser.new_context(user_agent=UA, viewport={'width': 1280, 'height': 900})
+        page = ctx.new_page()
+        try:
+            page.goto(source_url, wait_until='networkidle', timeout=30_000)
+            page.wait_for_timeout(1_500)
 
-def _parse_summ(summ_html: str) -> dict:
-    """Extract additional fields from the mapsearch 'summ' HTML snippet."""
-    fields = {}
-    text = re.sub(r'\s+', ' ', _strip_tags(summ_html)).strip()
+            if '404' in page.title() or page.url == 'https://www.coloproperty.com/':
+                return {}
 
-    # Lot size / acreage
-    m = re.search(r'on\s+([\d.]+)\s*Acr', text, re.I)
-    if m:
-        fields['Lot Size'] = m.group(1) + ' Acres'
+            # Primary: table rows (most MLS fields live here)
+            for row in page.query_selector_all('table tr'):
+                cells = row.query_selector_all('td')
+                if len(cells) >= 2:
+                    label = cells[0].inner_text().strip().rstrip(':').strip()
+                    value = cells[1].inner_text().strip()
+                    if label and value and 1 < len(label) < 60:
+                        # Skip navigation/action rows
+                        if label.lower() not in ('request info', 'compare', 'share'):
+                            fields[label] = value
 
-    # Property type
-    m = re.search(r'(Attached|Detached|Single[- ]?Family|Condo|Townhome|Ranch|'
-                  r'Multi[- ]?Family|Commercial|Industrial|Office|Retail)\b', text, re.I)
-    if m:
-        fields['Property Type'] = m.group(1)
+            # Secondary: any remaining label/value divs
+            for wrapper in page.query_selector_all('[class*="detail"],[class*="field"],[class*="row"],[class*="item"]'):
+                try:
+                    children = wrapper.query_selector_all(':scope > *')
+                    if len(children) == 2:
+                        label = children[0].inner_text().strip().rstrip(':').strip()
+                        value = children[1].inner_text().strip()
+                        if label and value and 1 < len(label) < 60 and len(value) < 200:
+                            fields.setdefault(label, value)
+                except Exception:
+                    pass
 
-    # Price per sqft
-    m = re.search(r'\(\$([\d,]+)/SF\)', text)
-    if m:
-        fields['Price/SqFt'] = '$' + m.group(1) + '/SF'
-
-    # Listing office (inside card-list-office span)
-    m = re.search(r'card-list-office[^>]*>(.*?)<', summ_html, re.I | re.S)
-    if m:
-        office = _strip_tags(m.group(1)).strip()
-        if office:
-            fields['Listing Office'] = office
+            fields['_source_url'] = page.url
+        except PWTimeout:
+            fields['_error'] = 'timeout'
+        except Exception as e:
+            fields['_error'] = str(e)
+        finally:
+            browser.close()
 
     return fields
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Detail page via plain HTTP (no Playwright — Cloudflare blocks headless)
-# ──────────────────────────────────────────────────────────────────────────────
-
-def fetch_detail_http(lid, cookie_str: str = '') -> dict:
-    """Fetch /listing/details/{lid} with urllib and parse table rows."""
-    url = f'https://www.coloproperty.com/listing/details/{lid}'
-    try:
-        if not cookie_str:
-            cookie_str = _cp_cookies()
-        req = urllib.request.Request(url, headers={
-            'User-Agent': UA,
-            'Cookie': cookie_str,
-            'Referer': 'https://www.coloproperty.com/',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-        })
-        with urllib.request.urlopen(req, timeout=20) as r:
-            html = r.read().decode('utf-8', errors='replace')
-
-        # If Cloudflare challenge page, bail out
-        if '<title>Just a moment' in html or 'cf-browser-verification' in html:
-            return {'_blocked': True}
-
-        fields = {}
-        # Parse <tr><td>Label</td><td>Value</td></tr>
-        for row_m in re.finditer(r'<tr[^>]*>(.*?)</tr>', html, re.I | re.S):
-            cells = re.findall(r'<td[^>]*>(.*?)</td>', row_m.group(1), re.I | re.S)
-            if len(cells) >= 2:
-                label = _strip_tags(cells[0]).strip().rstrip(':').strip()
-                value = _strip_tags(cells[1]).strip()
-                if label and value and 1 < len(label) < 60:
-                    if label.lower() not in ('request info', 'compare', 'share', 'action'):
-                        fields[label] = value
-
-        # Also grab definition-list style dt/dd pairs
-        for dt_m in re.finditer(r'<dt[^>]*>(.*?)</dt>\s*<dd[^>]*>(.*?)</dd>', html, re.I | re.S):
-            label = _strip_tags(dt_m.group(1)).strip().rstrip(':').strip()
-            value = _strip_tags(dt_m.group(2)).strip()
-            if label and value and 1 < len(label) < 60:
-                fields.setdefault(label, value)
-
-        fields['_source_url'] = url
-        return fields
-    except Exception as e:
-        return {'_error': str(e)}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Key field extraction
 # ──────────────────────────────────────────────────────────────────────────────
 
-SIZE_KEYS    = ['lot size', 'lot sq ft', 'lot sqft', 'lot area', 'total acres', 'acreage',
-                'land area', 'land sq ft', 'parcel size', 'approx lot size', 'sq ft lot',
-                'total sq ft', 'total sqft', 'square feet', 'square footage', 'bldg sq ft',
-                'finished sq ft', 'above grade sq ft', 'approx sqft', 'finished',
-                'building sqft', 'sqft', 'beds']
-ZONING_KEYS  = ['zoning', 'zoning type', 'zone', 'zoning code', 'land use', 'property use',
-                'use code', 'zoning description', 'use type']
-FAR_KEYS     = ['floor area ratio', 'far', 'f.a.r', 'floor/area', 'floor-area ratio']
-COV_KEYS     = ['building coverage', 'lot coverage', 'coverage ratio', 'coverage %',
-                'impervious coverage', 'impervious surface', 'max coverage', 'max lot coverage']
-
-# Better size priority: prefer explicit sqft/lot over beds
-SIZE_PRIORITY = ['square feet', 'building sqft', 'lot size', 'total sqft', 'sqft',
-                 'lot area', 'acreage', 'total acres', 'finished sq ft', 'above grade sq ft']
+SIZE_KEYS    = ['lot size','lot sq ft','lot sqft','lot area','total acres','acreage',
+                'land area','land sq ft','parcel size','approx lot size','sq ft lot',
+                'total sq ft','total sqft','square feet','square footage','bldg sq ft',
+                'finished sq ft','above grade sq ft','approx sqft','total','finished']
+ZONING_KEYS  = ['zoning','zoning type','zone','zoning code','land use','property use',
+                'use code','zoning description','use type']
+FAR_KEYS     = ['floor area ratio','far','f.a.r','floor/area','floor-area ratio']
+COV_KEYS     = ['building coverage','lot coverage','coverage ratio','coverage %',
+                'impervious coverage','impervious surface','max coverage','max lot coverage']
 
 
 def best(fields: dict, keys: list):
     fl = {k.lower(): v for k, v in fields.items()}
     for key in keys:
-        for label, val in fl.items():
-            if key in label or label in key:
-                return val
-    return None
-
-
-def best_size(fields: dict):
-    fl = {k.lower(): v for k, v in fields.items()}
-    for key in SIZE_PRIORITY:
         for label, val in fl.items():
             if key in label or label in key:
                 return val
@@ -300,10 +241,7 @@ def lookup(address: str) -> dict:
     # 1. Geocode
     geo = geocode(address)
     if not geo:
-        result['notes'].append(
-            'Address not recognized. Try including city and state, '
-            'e.g. "123 Main St, Boulder, CO".'
-        )
+        result['notes'].append('Address not recognized. Try including city and state, e.g. "123 Main St, Boulder, CO".')
         return result
 
     lat, lng = geo['lat'], geo['lng']
@@ -332,44 +270,40 @@ def lookup(address: str) -> dict:
         return result
 
     lid = listing.get('lid')
-    result['source_url'] = f'https://www.coloproperty.com/listing/details/{lid}' if lid else None
 
-    # 4. Core fields from mapsearch listing object
-    for k, label in [('addr1', 'Address'), ('addr2', 'City/State/Zip'),
-                     ('price', 'Price'), ('status', 'MLS Status'), ('mlsNumber', 'MLS Number')]:
+    # 4. Add mapsearch summary fields
+    for k in ('addr1', 'addr2', 'price', 'status', 'mlsNumber'):
         if listing.get(k):
-            result['raw_fields'][label] = str(listing[k])
+            result['raw_fields'][k.replace('addr', 'Address').replace('mls', 'MLS ')] = str(listing[k])
 
-    # 5. Parse quick + summ HTML (rich data already in mapsearch response)
-    result['raw_fields'].update(_parse_quick(listing.get('quick', '')))
-    result['raw_fields'].update(_parse_summ(listing.get('summ', '')))
+    # Parse quick summary (beds/baths/sqft)
+    quick_html = listing.get('quick', '')
+    for pat, label in [
+        (r'(\d+)\s*bd', 'Beds'),
+        (r'(\d+)\s*ba', 'Baths'),
+        (r'([\d,]+)\s*sqft', 'SqFt'),
+    ]:
+        m = re.search(pat, quick_html, re.I)
+        if m:
+            result['raw_fields'][label] = m.group(1).replace(',', '')
 
-    # 6. Try detail page via plain HTTP
+    # 5. Scrape full detail page
     if lid:
-        cookies = ''
-        try:
-            cookies = _cp_cookies()
-        except Exception:
-            pass
-        detail = fetch_detail_http(lid, cookies)
-        blocked = detail.pop('_blocked', False)
+        detail = scrape_detail(lid)
         source_url = detail.pop('_source_url', None)
-        err = detail.pop('_error', None)
+        scrape_error = detail.pop('_error', None)
+        if scrape_error:
+            result['notes'].append(f'Detail page scrape note: {scrape_error}')
         if source_url:
             result['source_url'] = source_url
-        if not blocked and detail:
-            result['raw_fields'].update(detail)
-        elif blocked:
-            result['notes'].append(
-                'Full listing details are protected by Cloudflare on ColoProperty.com. '
-                'Data shown is from the MLS search index.'
-            )
+        # Merge — detail page takes priority
+        result['raw_fields'].update(detail)
 
     result['found'] = True
 
-    # 7. Map to headline fields
+    # 6. Map to the four headline fields
     fields = result['raw_fields']
-    result['property_size']     = best_size(fields)
+    result['property_size']     = best(fields, SIZE_KEYS)
     result['zoning']            = best(fields, ZONING_KEYS)
     result['floor_area_ratio']  = best(fields, FAR_KEYS)
     result['building_coverage'] = best(fields, COV_KEYS)
@@ -407,8 +341,10 @@ def api_lookup():
 
 @app.route('/api/debug')
 def api_debug():
-    """Step-by-step diagnostic."""
-    address = request.args.get('address', '2420 Windrow Dr, Fort Collins, CO 80525').strip()
+    """Step-by-step diagnostic — use ?address=... to trace what each stage returns."""
+    address = request.args.get('address', '').strip()
+    if not address:
+        address = '2420 Windrow Dr, Fort Collins, CO 80525'
     out = {'address': address}
     try:
         geo = geocode(address)
@@ -420,19 +356,42 @@ def api_debug():
         try:
             cookie_str = _cp_cookies()
             out['cookies_ok'] = bool(cookie_str)
+            out['cookie_str'] = cookie_str[:80]
         except Exception as e:
             out['cookies_error'] = str(e)
-            cookie_str = ''
-        results = mapsearch(lat, lng, delta=0.02)
-        out['mapsearch_count'] = len(results)
-        out['mapsearch_sample'] = results[:2]
+        # Raw mapsearch response
+        try:
+            delta = 0.02
+            params = {
+                'latMin': str(lat - delta), 'latMax': str(lat + delta),
+                'lngMin': str(lng - delta), 'lngMax': str(lng + delta),
+                'showSolds': 'A,AB,AF,AP,C,P,S',
+                'typeIds': '1,2,3,4,5,6,7,8,9,10',
+                'perPage': '20', 'maxResults': '20',
+                'searchFor': 'listing',
+            }
+            url = 'https://www.coloproperty.com/listing/mapsearch?' + urllib.parse.urlencode(params)
+            req = urllib.request.Request(url, headers={
+                'User-Agent': UA, 'Cookie': cookie_str,
+                'X-Requested-With': 'XMLHttpRequest',
+                'Referer': 'https://www.coloproperty.com/',
+            })
+            with urllib.request.urlopen(req, timeout=15) as r:
+                raw = json.loads(r.read())
+            out['mapsearch_raw_keys'] = list(raw.keys()) if isinstance(raw, dict) else str(raw)[:200]
+            d = raw.get('D', {})
+            out['mapsearch_D_keys'] = list(d.keys()) if isinstance(d, dict) else str(d)[:200]
+            results_raw = d.get('Results', [])
+            out['mapsearch_count'] = len(results_raw)
+            out['mapsearch_sample'] = results_raw[:2]
+        except Exception as e:
+            out['mapsearch_error'] = str(e)
         listing = find_listing(lat, lng, address)
-        out['listing_matched'] = listing
+        out['listing'] = listing
         if listing and listing.get('lid'):
-            detail = fetch_detail_http(listing['lid'], cookie_str)
-            out['detail'] = detail
-            out['quick_parsed'] = _parse_quick(listing.get('quick', ''))
-            out['summ_parsed'] = _parse_summ(listing.get('summ', ''))
+            detail = scrape_detail(listing['lid'])
+            out['detail_keys'] = list(detail.keys())
+            out['detail_sample'] = {k: v for k, v in list(detail.items())[:10]}
     except Exception as e:
         out['exception'] = str(e)
     return jsonify(out)
