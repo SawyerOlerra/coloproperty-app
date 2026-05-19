@@ -1,22 +1,14 @@
-FROM python:3.12-slim
-
-# System deps for Chromium
-RUN apt-get update && apt-get install -y \
-    libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
-    libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
-    libgbm1 libasound2 libpangocairo-1.0-0 libpango-1.0-0 \
-    libcairo2 libgdk-pixbuf2.0-0 libgtk-3-0 libx11-xcb1 \
-    wget ca-certificates fonts-liberation xdg-utils --no-install-recommends \
-    && rm -rf /var/lib/apt/lists/*
+# Official Playwright image — Chromium + all system deps pre-installed
+FROM mcr.microsoft.com/playwright/python:v1.44.0-jammy
 
 WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-RUN playwright install chromium --with-deps
 
 COPY app.py .
 COPY templates/ templates/
 
 EXPOSE 8080
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--timeout", "120", "--workers", "2", "app:app"]
+# Use shell form so $PORT expands (Railway injects PORT at runtime)
+CMD gunicorn --bind 0.0.0.0:${PORT:-8080} --timeout 120 --workers 1 app:app
