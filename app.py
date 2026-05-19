@@ -149,7 +149,10 @@ def scrape_detail(lid) -> dict:
     source_url = f'https://www.coloproperty.com/listing/details/{lid}'
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
+        browser = pw.chromium.launch(
+            headless=True,
+            args=['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+        )
         ctx = browser.new_context(user_agent=UA, viewport={'width': 1280, 'height': 900})
         page = ctx.new_page()
         try:
@@ -288,7 +291,9 @@ def lookup(address: str) -> dict:
     if lid:
         detail = scrape_detail(lid)
         source_url = detail.pop('_source_url', None)
-        detail.pop('_error', None)
+        scrape_error = detail.pop('_error', None)
+        if scrape_error:
+            result['notes'].append(f'Detail page scrape note: {scrape_error}')
         if source_url:
             result['source_url'] = source_url
         # Merge — detail page takes priority
@@ -332,6 +337,39 @@ def api_lookup():
     if not address:
         return jsonify({'error': 'Address is required'}), 400
     return jsonify(lookup(address))
+
+
+@app.route('/api/debug')
+def api_debug():
+    """Step-by-step diagnostic — use ?address=... to trace what each stage returns."""
+    address = request.args.get('address', '').strip()
+    if not address:
+        address = '2420 Windrow Dr, Fort Collins, CO 80525'
+    out = {'address': address}
+    try:
+        geo = geocode(address)
+        out['geocode'] = geo
+        if not geo:
+            out['stop'] = 'geocode failed'
+            return jsonify(out)
+        lat, lng = geo['lat'], geo['lng']
+        try:
+            cookie_str = _cp_cookies()
+            out['cookies_ok'] = bool(cookie_str)
+        except Exception as e:
+            out['cookies_error'] = str(e)
+        results = mapsearch(lat, lng, delta=0.008)
+        out['mapsearch_count'] = len(results)
+        out['mapsearch_sample'] = results[:3] if results else []
+        listing = find_listing(lat, lng, address)
+        out['listing'] = listing
+        if listing and listing.get('lid'):
+            detail = scrape_detail(listing['lid'])
+            out['detail_keys'] = list(detail.keys())
+            out['detail_sample'] = {k: v for k, v in list(detail.items())[:10]}
+    except Exception as e:
+        out['exception'] = str(e)
+    return jsonify(out)
 
 
 if __name__ == '__main__':

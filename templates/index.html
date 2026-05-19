@@ -297,7 +297,10 @@ async function doSearch() {
   }, 4000);
 
   try {
-    const resp = await fetch('/api/lookup?address=' + encodeURIComponent(addr));
+    const controller = new AbortController();
+    const tid = setTimeout(() => controller.abort(), 100000);
+    const resp = await fetch('/api/lookup?address=' + encodeURIComponent(addr), { signal: controller.signal });
+    clearTimeout(tid);
     clearInterval(ticker);
     const data = await resp.json();
 
