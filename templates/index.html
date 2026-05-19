@@ -232,6 +232,13 @@
       </div>
     </div>
 
+    <div class="notes-box" id="assessorBox" style="display:none">
+      <strong>County Assessor Record</strong>
+      <p style="margin-top:.3rem">For lot size, zoning, and ownership records, visit the official county assessor:
+        <a id="assessorLink" href="#" target="_blank" rel="noopener" style="color:#92400e;font-weight:600">Open Assessor Site →</a>
+      </p>
+    </div>
+
     <div class="notes-box" id="notesBox" style="display:none">
       <strong>⚠ Notes</strong>
       <ul id="notesList"></ul>
@@ -319,6 +326,14 @@ async function doSearch() {
     const lnk = document.getElementById('resultLink');
     if (data.source_url) { lnk.href = data.source_url; lnk.parentElement.style.display = ''; }
     else                 { lnk.parentElement.style.display = 'none'; }
+
+    const aLink = document.getElementById('assessorLink');
+    if (data.assessor_url) {
+      aLink.href = data.assessor_url;
+      document.getElementById('assessorBox').style.display = '';
+    } else {
+      document.getElementById('assessorBox').style.display = 'none';
+    }
 
     setKpi('size',   data.property_size,        null);
     setKpi('zoning', data.zoning,               null);
