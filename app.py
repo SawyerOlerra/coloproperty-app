@@ -356,11 +356,36 @@ def api_debug():
         try:
             cookie_str = _cp_cookies()
             out['cookies_ok'] = bool(cookie_str)
+            out['cookie_str'] = cookie_str[:80]
         except Exception as e:
             out['cookies_error'] = str(e)
-        results = mapsearch(lat, lng, delta=0.008)
-        out['mapsearch_count'] = len(results)
-        out['mapsearch_sample'] = results[:3] if results else []
+        # Raw mapsearch response
+        try:
+            delta = 0.02
+            params = {
+                'latMin': str(lat - delta), 'latMax': str(lat + delta),
+                'lngMin': str(lng - delta), 'lngMax': str(lng + delta),
+                'showSolds': 'A,AB,AF,AP,C,P,S',
+                'typeIds': '1,2,3,4,5,6,7,8,9,10',
+                'perPage': '20', 'maxResults': '20',
+                'searchFor': 'listing',
+            }
+            url = 'https://www.coloproperty.com/listing/mapsearch?' + urllib.parse.urlencode(params)
+            req = urllib.request.Request(url, headers={
+                'User-Agent': UA, 'Cookie': cookie_str,
+                'X-Requested-With': 'XMLHttpRequest',
+                'Referer': 'https://www.coloproperty.com/',
+            })
+            with urllib.request.urlopen(req, timeout=15) as r:
+                raw = json.loads(r.read())
+            out['mapsearch_raw_keys'] = list(raw.keys()) if isinstance(raw, dict) else str(raw)[:200]
+            d = raw.get('D', {})
+            out['mapsearch_D_keys'] = list(d.keys()) if isinstance(d, dict) else str(d)[:200]
+            results_raw = d.get('Results', [])
+            out['mapsearch_count'] = len(results_raw)
+            out['mapsearch_sample'] = results_raw[:2]
+        except Exception as e:
+            out['mapsearch_error'] = str(e)
         listing = find_listing(lat, lng, address)
         out['listing'] = listing
         if listing and listing.get('lid'):
