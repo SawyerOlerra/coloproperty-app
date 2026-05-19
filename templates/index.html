@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>ColoProperty Lookup</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet"/>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --blue:    #1B4B82;
+      --blue-lt: #2563a8;
+      --gold:    #D97706;
+      --bg:      #EDF2F7;
+      --card:    #FFFFFF;
+      --border:  #CBD5E0;
+      --text:    #1A202C;
+      --muted:   #718096;
+      --danger:  #C53030;
+      --warn:    #B7791F;
+    }
+    body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+
+    header {
+      background: linear-gradient(135deg, #0f2d52 0%, #1B4B82 60%, #2563a8 100%);
+      color: #fff; padding: 2.2rem 1.5rem 3.2rem; text-align: center; position: relative; overflow: hidden;
+    }
+    header::after {
+      content: ''; position: absolute; bottom: 0; left: 0; right: 0; height: 56px;
+      background: var(--bg); clip-path: ellipse(55% 100% at 50% 100%);
+    }
+    .badge {
+      display: inline-block; background: rgba(255,255,255,.14); border: 1px solid rgba(255,255,255,.28);
+      border-radius: 99px; font-size: .72rem; font-weight: 600; letter-spacing: .07em;
+      text-transform: uppercase; padding: .28rem .9rem; margin-bottom: .9rem; color: #c8ddff;
+    }
+    header h1 { font-size: 1.9rem; font-weight: 700; line-height: 1.2; }
+    header p  { margin-top: .45rem; color: #c8ddff; font-size: .92rem; }
+
+    .search-wrap {
+      max-width: 680px; margin: -1.4rem auto 2rem; padding: 0 1rem; position: relative; z-index: 10;
+    }
+    .search-card {
+      background: var(--card); border-radius: 16px;
+      box-shadow: 0 4px 24px rgba(0,0,0,.13); padding: 1.4rem 1.5rem 1.2rem;
+    }
+    .search-row { display: flex; gap: .7rem; }
+    .search-row input {
+      flex: 1; border: 1.5px solid var(--border); border-radius: 10px;
+      padding: .75rem 1rem; font-size: 1rem; font-family: inherit; outline: none;
+      transition: border-color .2s, box-shadow .2s;
+    }
+    .search-row input:focus {
+      border-color: var(--blue-lt); box-shadow: 0 0 0 3px rgba(37,99,168,.13);
+    }
+    .search-row button {
+      background: var(--blue); color: #fff; border: none; border-radius: 10px;
+      padding: .75rem 1.35rem; font-size: .95rem; font-weight: 600; font-family: inherit;
+      cursor: pointer; white-space: nowrap; transition: background .2s, transform .1s;
+      display: flex; align-items: center; gap: .45rem;
+    }
+    .search-row button:hover:not(:disabled) { background: var(--blue-lt); }
+    .search-row button:active:not(:disabled) { transform: scale(.97); }
+    .search-row button:disabled { opacity: .6; cursor: default; }
+    .search-hint { font-size: .78rem; color: var(--muted); margin-top: .6rem; }
+
+    main { max-width: 900px; margin: 0 auto; padding: 0 1rem 4rem; }
+
+    #loader { display: none; text-align: center; padding: 3.5rem 0; }
+    .spinner {
+      width: 46px; height: 46px; border: 4px solid var(--border); border-top-color: var(--blue);
+      border-radius: 50%; animation: spin .8s linear infinite; margin: 0 auto 1rem;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #loaderMsg { color: var(--muted); font-size: .9rem; }
+
+    .msg-box {
+      background: var(--card); border-radius: 12px; padding: 1.8rem 1.5rem;
+      text-align: center; border-left: 4px solid var(--danger);
+      box-shadow: 0 2px 12px rgba(0,0,0,.07);
+    }
+    .msg-box.warn { border-left-color: var(--gold); }
+    .msg-box h3 { font-size: 1rem; margin-bottom: .35rem; }
+    .msg-box p  { font-size: .88rem; color: var(--muted); }
+
+    .result-header {
+      background: var(--card); border-radius: 12px; padding: 1rem 1.4rem;
+      margin-bottom: 1rem; display: flex; align-items: center;
+      justify-content: space-between; flex-wrap: wrap; gap: .5rem;
+      box-shadow: 0 2px 10px rgba(0,0,0,.07);
+    }
+    .result-address { font-size: 1.05rem; font-weight: 600; }
+    .result-link a {
+      font-size: .78rem; color: var(--blue); text-decoration: none;
+      display: flex; align-items: center; gap: .3rem;
+    }
+    .result-link a:hover { text-decoration: underline; }
+
+    .kpi-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(198px, 1fr));
+      gap: 1rem; margin-bottom: 1rem;
+    }
+    .kpi-card {
+      background: var(--card); border-radius: 14px; padding: 1.3rem 1.2rem 1.1rem;
+      box-shadow: 0 2px 10px rgba(0,0,0,.07); border-top: 3px solid var(--border);
+      display: flex; flex-direction: column; gap: .32rem;
+    }
+    .kpi-card.has-data  { border-top-color: var(--blue); }
+    .kpi-card.warn-data { border-top-color: var(--gold); }
+    .kpi-icon  { font-size: 1.45rem; }
+    .kpi-label { font-size: .7rem; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
+    .kpi-value { font-size: 1.05rem; font-weight: 700; line-height: 1.3; color: var(--text); }
+    .kpi-value.na { color: var(--muted); font-weight: 400; font-style: italic; font-size: .92rem; }
+    .kpi-note  { font-size: .71rem; color: var(--warn); margin-top: .05rem; }
+
+    .fields-wrap {
+      background: var(--card); border-radius: 12px; overflow: hidden;
+      box-shadow: 0 2px 10px rgba(0,0,0,.07); margin-bottom: 1rem;
+    }
+    .fields-toggle {
+      width: 100%; background: none; border: none; border-bottom: 1px solid var(--border);
+      padding: .85rem 1.4rem; font-size: .86rem; font-weight: 600; font-family: inherit;
+      color: var(--blue); text-align: left; cursor: pointer;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .fields-toggle:hover { background: #f7faff; }
+    .fields-body { padding: .4rem 1rem .9rem; }
+    .fields-body.hidden { display: none; }
+    .fields-table { width: 100%; border-collapse: collapse; font-size: .84rem; }
+    .fields-table tr { border-bottom: 1px solid #f0f0f0; }
+    .fields-table tr:last-child { border-bottom: none; }
+    .fields-table td:first-child {
+      color: var(--muted); font-weight: 500; width: 44%;
+      padding: .4rem .5rem .4rem 0; vertical-align: top; text-transform: capitalize;
+    }
+    .fields-table td:last-child { font-weight: 500; padding: .4rem 0 .4rem .5rem; }
+
+    .notes-box {
+      background: #fffbeb; border: 1px solid #fde68a; border-radius: 10px;
+      padding: .9rem 1.2rem; font-size: .82rem; color: #92400e;
+    }
+    .notes-box strong { display: block; margin-bottom: .35rem; }
+    .notes-box ul { padding-left: 1.1rem; }
+    .notes-box li { margin-top: .22rem; }
+
+    #results { display: none; }
+    footer { text-align: center; font-size: .73rem; color: var(--muted); padding: 1rem; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="badge">▲ Colorado MLS · Licensed Data</div>
+  <h1>Property Details Lookup</h1>
+  <p>Zoning &nbsp;·&nbsp; Property Size &nbsp;·&nbsp; Floor Area Ratio &nbsp;·&nbsp; Building Coverage</p>
+</header>
+
+<div class="search-wrap">
+  <div class="search-card">
+    <div class="search-row">
+      <input id="addrInput" type="text"
+             placeholder="e.g. 2420 Windrow Dr, Fort Collins, CO 80525"
+             onkeydown="if(event.key==='Enter') doSearch()"/>
+      <button id="searchBtn" onclick="doSearch()">
+        <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.3"
+             viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+        Look Up
+      </button>
+    </div>
+    <p class="search-hint">Enter a full street address including city — scraped live from ColoProperty.com (IRES MLS)</p>
+  </div>
+</div>
+
+<main>
+  <div id="loader">
+    <div class="spinner"></div>
+    <p id="loaderMsg">Starting up…</p>
+  </div>
+
+  <div id="errorBox" style="display:none"></div>
+
+  <div id="results">
+    <div class="result-header">
+      <span class="result-address" id="resultAddress"></span>
+      <span class="result-link">
+        <a id="resultLink" href="#" target="_blank" rel="noopener">
+          <svg width="12" height="12" fill="none" stroke="currentColor" stroke-width="2"
+               viewBox="0 0 24 24">
+            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+            <polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
+          </svg>
+          View on ColoProperty.com
+        </a>
+      </span>
+    </div>
+
+    <div class="kpi-grid">
+      <div class="kpi-card" id="kpi-size">
+        <span class="kpi-icon">📐</span>
+        <span class="kpi-label">Property Size</span>
+        <span class="kpi-value" id="val-size">—</span>
+        <span class="kpi-note" id="note-size" style="display:none"></span>
+      </div>
+      <div class="kpi-card" id="kpi-zoning">
+        <span class="kpi-icon">🏛</span>
+        <span class="kpi-label">Zoning</span>
+        <span class="kpi-value" id="val-zoning">—</span>
+        <span class="kpi-note" id="note-zoning" style="display:none"></span>
+      </div>
+      <div class="kpi-card" id="kpi-far">
+        <span class="kpi-icon">📊</span>
+        <span class="kpi-label">Floor Area Ratio (FAR)</span>
+        <span class="kpi-value" id="val-far">—</span>
+        <span class="kpi-note" id="note-far" style="display:none"></span>
+      </div>
+      <div class="kpi-card" id="kpi-cov">
+        <span class="kpi-icon">🏗</span>
+        <span class="kpi-label">Building Coverage</span>
+        <span class="kpi-value" id="val-cov">—</span>
+        <span class="kpi-note" id="note-cov" style="display:none"></span>
+      </div>
+    </div>
+
+    <div class="fields-wrap">
+      <button class="fields-toggle" onclick="toggleFields()">
+        <span>All Available MLS Fields</span>
+        <span id="toggleIcon">▼</span>
+      </button>
+      <div class="fields-body hidden" id="fieldsBody">
+        <table class="fields-table" id="fieldsTable"></table>
+      </div>
+    </div>
+
+    <div class="notes-box" id="notesBox" style="display:none">
+      <strong>⚠ Notes</strong>
+      <ul id="notesList"></ul>
+    </div>
+  </div>
+</main>
+
+<footer>Data sourced from ColoProperty.com / IRES MLS &nbsp;·&nbsp; Licensed use only</footer>
+
+<script>
+let expanded = false;
+
+function toggleFields() {
+  expanded = !expanded;
+  document.getElementById('fieldsBody').classList.toggle('hidden', !expanded);
+  document.getElementById('toggleIcon').textContent = expanded ? '▲' : '▼';
+}
+
+function setKpi(id, value, note) {
+  const card  = document.getElementById('kpi-' + id);
+  const valEl = document.getElementById('val-' + id);
+  const noteEl= document.getElementById('note-' + id);
+  if (value) {
+    valEl.textContent  = value;
+    valEl.className    = 'kpi-value';
+    card.className     = 'kpi-card has-data';
+  } else {
+    valEl.textContent  = 'Not in MLS data';
+    valEl.className    = 'kpi-value na';
+    card.className     = 'kpi-card warn-data';
+  }
+  if (note) { noteEl.textContent = note; noteEl.style.display = ''; }
+  else       { noteEl.style.display = 'none'; }
+}
+
+async function doSearch() {
+  const addr = document.getElementById('addrInput').value.trim();
+  if (!addr) { document.getElementById('addrInput').focus(); return; }
+
+  document.getElementById('errorBox').style.display  = 'none';
+  document.getElementById('results').style.display   = 'none';
+  document.getElementById('loader').style.display    = 'block';
+  document.getElementById('searchBtn').disabled      = true;
+
+  const steps = [
+    'Launching headless browser…',
+    'Loading ColoProperty.com…',
+    'Searching for address…',
+    'Opening listing page…',
+    'Extracting property fields…',
+  ];
+  let si = 0;
+  const msgEl  = document.getElementById('loaderMsg');
+  const ticker = setInterval(() => {
+    if (si < steps.length - 1) msgEl.textContent = steps[++si];
+  }, 4000);
+
+  try {
+    const resp = await fetch('/api/lookup?address=' + encodeURIComponent(addr));
+    clearInterval(ticker);
+    const data = await resp.json();
+
+    document.getElementById('loader').style.display   = 'none';
+    document.getElementById('searchBtn').disabled     = false;
+
+    if (data.error && !data.found) {
+      document.getElementById('errorBox').innerHTML =
+        `<div class="msg-box"><h3>Error</h3><p>${data.error}</p></div>`;
+      document.getElementById('errorBox').style.display = '';
+      return;
+    }
+
+    if (!data.found) {
+      document.getElementById('errorBox').innerHTML =
+        `<div class="msg-box warn">
+           <h3>No Listing Found</h3>
+           <p>No MLS listing matched that address on ColoProperty.com.<br>
+              Try including the full city name, e.g. "123 Oak St, Boulder, CO".</p>
+         </div>`;
+      document.getElementById('errorBox').style.display = '';
+      return;
+    }
+
+    document.getElementById('resultAddress').textContent = data.address;
+    const lnk = document.getElementById('resultLink');
+    if (data.source_url) { lnk.href = data.source_url; lnk.parentElement.style.display = ''; }
+    else                 { lnk.parentElement.style.display = 'none'; }
+
+    setKpi('size',   data.property_size,        null);
+    setKpi('zoning', data.zoning,               null);
+    setKpi('far',    data.floor_area_ratio,      'Contact local planning dept. if unavailable');
+    setKpi('cov',    data.building_coverage,     'Contact local zoning office if unavailable');
+
+    const tbl  = document.getElementById('fieldsTable');
+    tbl.innerHTML = '';
+    const raw  = data.raw_fields || {};
+    const keys = Object.keys(raw);
+    if (keys.length === 0) {
+      tbl.innerHTML = '<tr><td colspan="2" style="color:var(--muted);padding:.5rem 0">No additional fields extracted.</td></tr>';
+    } else {
+      keys.forEach(k => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${k}</td><td>${raw[k]}</td>`;
+        tbl.appendChild(tr);
+      });
+    }
+
+    const notes = data.notes || [];
+    if (notes.length) {
+      document.getElementById('notesList').innerHTML = notes.map(n => `<li>${n}</li>`).join('');
+      document.getElementById('notesBox').style.display = '';
+    } else {
+      document.getElementById('notesBox').style.display = 'none';
+    }
+
+    document.getElementById('results').style.display = '';
+
+  } catch (err) {
+    clearInterval(ticker);
+    document.getElementById('loader').style.display   = 'none';
+    document.getElementById('searchBtn').disabled     = false;
+    document.getElementById('errorBox').innerHTML     =
+      `<div class="msg-box"><h3>Connection Error</h3><p>${err.message}</p></div>`;
+    document.getElementById('errorBox').style.display = '';
+  }
+}
+</script>
+</body>
+</html>
